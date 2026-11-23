@@ -207,6 +207,33 @@ if (Test-Path $latest) { Remove-Item -LiteralPath $latest -Force }
 & python (Join-Path $SourceDir "scripts\windows_manifest.py") $Version $dist "$WcdbLib.build-inputs.json"
 if ($LASTEXITCODE -ne 0) { throw "release manifest generation failed" }
 Compress-Archive -Path $dist -DestinationPath $zip -Force
+# Compress-Archive under Windows PowerShell 5.1 writes backslash entry names,
+# which install-release.ps1 rejects as an unsafe release path. Rewrite the
+# archive with forward slashes before hashing and publishing it.
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$normalizedZip = "$zip.normalizing"
+$sourceArchive = [IO.Compression.ZipFile]::OpenRead($zip)
+try {
+  $outFile = [IO.File]::Open($normalizedZip, [IO.FileMode]::Create)
+  try {
+    $targetArchive = New-Object IO.Compression.ZipArchive($outFile, [IO.Compression.ZipArchiveMode]::Create)
+    try {
+      foreach ($entry in $sourceArchive.Entries) {
+        $entryName = $entry.FullName -replace '\\', '/'
+        $newEntry = $targetArchive.CreateEntry($entryName, [IO.Compression.CompressionLevel]::Optimal)
+        if (-not $entryName.EndsWith('/')) {
+          $input = $entry.Open()
+          try {
+            $output = $newEntry.Open()
+            try { $input.CopyTo($output) } finally { $output.Dispose() }
+          } finally { $input.Dispose() }
+        }
+      }
+    } finally { $targetArchive.Dispose() }
+  } finally { $outFile.Dispose() }
+} finally { $sourceArchive.Dispose() }
+Remove-Item -LiteralPath $zip -Force
+Move-Item -LiteralPath $normalizedZip -Destination $zip -Force
 Copy-Item -LiteralPath $zip -Destination $latest -Force
 Write-Sha256Manifest -SourcePath $zip -ManifestPath "$zip.sha256" -FileName (Split-Path $zip -Leaf)
 Write-Sha256Manifest -SourcePath $latest -ManifestPath "$latest.sha256" -FileName (Split-Path $latest -Leaf)
